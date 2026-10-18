@@ -4,3 +4,4 @@ build/
 dist/
 *.spec
 machine_option.json
+.venv/

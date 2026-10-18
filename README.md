@@ -6,9 +6,9 @@ This little tool opens a plasma G-code file, finds the real extents of the cut (
 Made for the SheetCam post processor **Centroid Acorn Plasma THC.scpost**. The block is inserted before the first `M65`. If there is no `M65`, it goes before the first `M3`, or else before the first cut move.
 
 ## Usage
-1. Run `g-code_perimeter_generator.exe` (or `python g-code_perimeter_generator.py`).
-2. The first time, choose your feed rate unit in **Machine Option**. The tool converts it to the units of the file (G20 = inch, G21 = mm).
-3. Type the feed, click **Select File**, check the preview (the inserted block is highlighted) and click **Save**.
+1. Run `g-code_perimeter_generator.exe`. From source: `pip install -r requirements.txt` then `python g-code_perimeter_generator.py`.
+2. Type the dry run feed and choose its unit. The tool converts it to the units of the file (G20 = inch, G21 = mm).
+3. Click **Open G-code file...**, check the preview (drawing of the part + the inserted block highlighted) and click **Save G-code**.
 
 To change the feed later, open the saved file again with a new feed. The old perimeter block is replaced. The rest of the program is never changed.
 
