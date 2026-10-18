@@ -74,6 +74,26 @@ def _arc_polyline(sx, sy, ex, ey, cx, cy, clockwise):
              cy + r * math.sin(a0 + sign * sweep * k / steps)) for k in range(steps + 1)]
 
 
+def _arc_center_from_r(sx, sy, ex, ey, r, clockwise):
+    """Centre of an R-format arc (same convention as GRBL / LinuxCNC: R<0 = more than 180 deg)."""
+    dx, dy = ex - sx, ey - sy
+    chord = math.hypot(dx, dy)
+    if chord == 0:
+        raise GcodeError("An R-format arc cannot be a full circle (start = end). Use I/J.")
+    disc = 4 * r * r - dx * dx - dy * dy
+    if disc < 0:
+        if disc > -1e-6 * max(1.0, r * r):  # rounding of a half circle
+            disc = 0.0
+        else:
+            raise GcodeError(f"Arc radius R{r} is too small for its end points.")
+    h = -math.sqrt(disc) / chord
+    if not clockwise:
+        h = -h
+    if r < 0:
+        h = -h
+    return sx + 0.5 * (dx - dy * h), sy + 0.5 * (dy + dx * h)
+
+
 def _find_block(lines):
     """Return (start, end) indexes (end exclusive) of a previously inserted block, or None."""
     for i, line in enumerate(lines):
@@ -101,6 +121,8 @@ def parse_gcode(lines):
     block = _find_block(lines)
     absolute = True
     motion = None
+    plane = 17
+    arc_center_absolute = False
     units = None
     used_incremental = False
     x = y = 0.0
@@ -117,8 +139,16 @@ def parse_gcode(lines):
         g_codes = [v for k, v in words if k == "G"]
         skip_xy = False
         for g in g_codes:
+            if abs(g - 90.1) < 1e-6:
+                arc_center_absolute = True
+                continue
+            if abs(g - 91.1) < 1e-6:
+                arc_center_absolute = False
+                continue
             gi = int(round(g)) if abs(g - round(g)) < 1e-6 else None
-            if gi in (0, 1, 2, 3):
+            if gi in (17, 18, 19):
+                plane = gi
+            elif gi in (0, 1, 2, 3):
                 motion = gi
             elif gi == 90:
                 absolute = True
@@ -150,13 +180,18 @@ def parse_gcode(lines):
             pts = [(x, y), (nx, ny)]
             cuts.append(pts)
         elif motion in (2, 3):
-            if "I" in vals or "J" in vals:
-                cx, cy = x + vals.get("I", 0.0), y + vals.get("J", 0.0)
-                pts = _arc_points(x, y, nx, ny, cx, cy, clockwise=(motion == 2))
-                cuts.append(_arc_polyline(x, y, nx, ny, cx, cy, clockwise=(motion == 2)))
+            # A wrong arc would shrink the perimeter without warning: refuse instead.
+            if plane != 17:
+                raise GcodeError(f"Line {idx + 1}: arc in plane G{plane}. Only G17 (XY) arcs are supported.")
+            if arc_center_absolute:
+                raise GcodeError(f"Line {idx + 1}: arc with absolute centre (G90.1) is not supported.")
+            cw = motion == 2
+            if "R" in vals and "I" not in vals and "J" not in vals:
+                cx, cy = _arc_center_from_r(x, y, nx, ny, vals["R"], cw)
             else:
-                pts = [(x, y), (nx, ny)]  # R-format: endpoints only
-                cuts.append(pts)
+                cx, cy = x + vals.get("I", 0.0), y + vals.get("J", 0.0)
+            pts = _arc_points(x, y, nx, ny, cx, cy, clockwise=cw)
+            cuts.append(_arc_polyline(x, y, nx, ny, cx, cy, clockwise=cw))
         else:
             pts = []
             rapids.append([(x, y), (nx, ny)])
@@ -202,13 +237,45 @@ def perimeter_path(info):
     return ordered + [ordered[0], (0.0, 0.0)]
 
 
-def build_block(info, feed, newline="\n"):
+def modal_state(lines, index):
+    """Distance mode, feed and motion mode in effect just before lines[index].
+
+    If no feed was set yet, the first F that follows is used, so the cuts after the
+    dry run never inherit the dry-run feed.
+    """
+    absolute, feed, motion = True, None, 0
+    for line in lines[:index]:
+        for k, v in _words(line):
+            if k == "G" and v in (0, 1, 2, 3):
+                motion = int(v)
+            elif k == "G" and v == 90:
+                absolute = True
+            elif k == "G" and v == 91:
+                absolute = False
+            elif k == "F":
+                feed = v
+    if feed is None:
+        for line in lines[index:]:
+            feed = next((v for k, v in _words(line) if k == "F"), None)
+            if feed is not None:
+                break
+    return {"absolute": absolute, "feed": feed, "motion": motion}
+
+
+def build_block(info, feed, newline="\n", restore=None):
     path = perimeter_path(info)
     f = _fmt(feed)
     out = [BLOCK_START, "G90"]
     for i, (px, py) in enumerate(path):
         out.append(f"G1 X{_fmt(px)} Y{_fmt(py)}" + (f" F{f}" if i == 0 else ""))
     out.append(PAUSE_LINE)
+    # Give the program back the state it had before the block.
+    if restore:
+        if restore["feed"] is not None:
+            out.append(f"G1 F{_fmt(restore['feed'])}")
+        out.append(f"G{restore['motion']}")
+        if not restore["absolute"]:
+            out.append("G91")
     out.append(BLOCK_END)
     return [l + newline for l in out]
 
@@ -249,7 +316,10 @@ def process(lines, feed, feed_unit, default_units=None):
     idx, where = find_insert_index(work)
     if idx == len(work) and work and not work[-1].endswith(("\n", "\r")):
         work[-1] += newline
-    work[idx:idx] = build_block(info, f_value, newline)
+    restore = modal_state(work, idx)
+    if restore["feed"] is None:
+        notes.append("No F found in the file: check the feed of the first cut.")
+    work[idx:idx] = build_block(info, f_value, newline, restore)
     notes.append(f"Perimeter inserted {where} (line {idx + 1}).")
     info["file_units"] = file_units
     info["feed_out"] = f_value
