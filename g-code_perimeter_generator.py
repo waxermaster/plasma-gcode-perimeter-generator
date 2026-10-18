@@ -52,6 +52,44 @@ def set_icon(window):
 _FALLBACK_SIZES = {"title": 16, "subtitle": 12}
 
 
+SCALE = 1.0  # screen zoom factor (1.0 = 96 dpi), set by apply_scaling()
+
+
+def px(value):
+    return int(round(value * SCALE))
+
+
+def screen_dpi(root):
+    """Real desktop zoom: Xft.dpi on Linux (what GNOME/KDE set), else what Tk/Windows reports."""
+    if sys.platform.startswith("linux"):
+        try:
+            import subprocess
+            out = subprocess.run(["xrdb", "-query"], capture_output=True, text=True, timeout=2).stdout
+            for line in out.splitlines():
+                if line.startswith("Xft.dpi:"):
+                    return float(line.split()[1])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return root.winfo_fpixels("1i")
+
+
+def apply_scaling(root):
+    """Make the UI follow the screen zoom (125 %, 150 %, 200 %...).
+
+    The Sun Valley theme sizes its fonts in pixels, which Tk never scales, so they
+    are enlarged here by hand.
+    """
+    global SCALE
+    dpi = screen_dpi(root)
+    SCALE = max(1.0, dpi / 96.0)
+    root.tk.call("tk", "scaling", dpi / 72.0)
+    for name in tkfont.names(root):
+        f = tkfont.nametofont(name)
+        size = f.cget("size")
+        if size < 0:  # negative = pixels
+            f.configure(size=int(round(size * SCALE)))
+
+
 def ui_font(kind):
     """'title' or 'subtitle': the theme's fonts when Sun Valley is loaded, else a bold default font."""
     name = {"title": "SunValleyTitleFont", "subtitle": "SunValleySubtitleFont"}[kind]
@@ -108,7 +146,7 @@ def draw_preview(canvas, info):
     xs = [p[0] for p in path] + [0.0]
     ys = [p[1] for p in path] + [0.0]
     min_x, max_x, min_y, max_y = min(xs), max(xs), min(ys), max(ys)
-    margin = 50
+    margin = px(40)
     scale = min((w - 2 * margin) / ((max_x - min_x) or 1), (h - 2 * margin) / ((max_y - min_y) or 1))
     ox = (w - (max_x - min_x) * scale) / 2
     oy = (h - (max_y - min_y) * scale) / 2
@@ -136,28 +174,28 @@ def draw_preview(canvas, info):
     for seg in info["rapids"]:
         canvas.create_line(*flat(seg), fill=C_RAPID, dash=(2, 4))
     for seg in info["cuts"]:
-        canvas.create_line(*flat(seg), fill=C_CUT, width=2, capstyle="round", joinstyle="round")
-    canvas.create_line(*flat(path), fill=C_PERIM, width=2, dash=(8, 4), arrow="last", arrowshape=(12, 14, 5))
+        canvas.create_line(*flat(seg), fill=C_CUT, width=px(2), capstyle="round", joinstyle="round")
+    canvas.create_line(*flat(path), fill=C_PERIM, width=px(2), dash=(8, 4), arrow="last", arrowshape=(px(12), px(14), px(5)))
     sx, sy = pt(*path[0])
-    canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5, outline=C_PERIM, width=2)
+    canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5, outline=C_PERIM, width=px(2))
     zx, zy = pt(0, 0)
-    canvas.create_line(zx - 9, zy, zx + 9, zy, fill=C_ORIGIN, width=2)
-    canvas.create_line(zx, zy - 9, zx, zy + 9, fill=C_ORIGIN, width=2)
+    canvas.create_line(zx - 9, zy, zx + 9, zy, fill=C_ORIGIN, width=px(2))
+    canvas.create_line(zx, zy - 9, zx, zy + 9, fill=C_ORIGIN, width=px(2))
     canvas.create_text(zx + 8, zy + 6, text="X0 Y0", fill=C_ORIGIN, anchor="nw", font=small)
 
     # legend
-    y = 14
+    y = px(12)
     for color, label, dash in ((C_CUT, "Cut", None), (C_PERIM, "Perimeter dry run", (6, 3)), (C_ORIGIN, "X0 Y0", None)):
-        canvas.create_line(14, y, 34, y, fill=color, width=2, dash=dash)
-        canvas.create_text(42, y, text=label, fill=C_TEXT, anchor="w", font=small)
-        y += 22
+        canvas.create_line(px(10), y, px(26), y, fill=color, width=px(2), dash=dash)
+        canvas.create_text(px(32), y, text=label, fill=C_TEXT, anchor="w", font=small)
+        y += px(18)
 
 
 # Preview and save
 #-----------------------------------------------------------------------
 def stat(parent, title, value, col):
-    box = ttk.Frame(parent, style="Card.TFrame", padding=(14, 8))
-    box.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 8, 0))
+    box = ttk.Frame(parent, style="Card.TFrame", padding=(px(14), px(8)))
+    box.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else px(8), 0))
     parent.columnconfigure(col, weight=1)
     ttk.Label(box, text=title, foreground=C_MUTED).pack(anchor="w")
     ttk.Label(box, text=value, font=ui_font("subtitle")).pack(anchor="w")
@@ -189,32 +227,32 @@ def preview_and_save(file_path, app):
     u = "in" if info["file_units"] == "inch" else "mm"
     win = tk.Toplevel(app.root)
     win.title(f"Preview - {os.path.basename(file_path)}")
-    win.geometry("1150x720")
-    win.minsize(760, 480)
+    win.geometry(f"{px(1000)}x{px(640)}")
+    win.minsize(px(700), px(450))
     set_icon(win)
 
-    outer = ttk.Frame(win, padding=16)
+    outer = ttk.Frame(win, padding=px(16))
     outer.pack(expand=True, fill="both")
 
     head = ttk.Frame(outer)
     head.pack(fill="x")
     ttk.Label(head, text=os.path.basename(file_path), font=ui_font("title")).pack(anchor="w")
-    ttk.Label(head, text="   ".join(notes), foreground=C_MUTED).pack(anchor="w", pady=(2, 10))
+    ttk.Label(head, text="   ".join(notes), foreground=C_MUTED).pack(anchor="w", pady=(px(2), px(10)))
 
     stats = ttk.Frame(outer)
-    stats.pack(fill="x", pady=(0, 12))
+    stats.pack(fill="x", pady=(0, px(12)))
     stat(stats, "Size", f"{info['max_x'] - info['min_x']:.3f} x {info['max_y'] - info['min_y']:.3f} {u}", 0)
     stat(stats, "X range", f"{info['min_x']:.3f}  to  {info['max_x']:.3f}", 1)
     stat(stats, "Y range", f"{info['min_y']:.3f}  to  {info['max_y']:.3f}", 2)
     stat(stats, "Dry run feed", f"{info['feed_out']:.1f} {u}/min", 3)
 
     buttons = ttk.Frame(outer)
-    buttons.pack(side="bottom", fill="x", pady=(12, 0))
+    buttons.pack(side="bottom", fill="x", pady=(px(12), 0))
 
     panes = ttk.PanedWindow(outer, orient="horizontal")
     panes.pack(expand=True, fill="both")
 
-    canvas = tk.Canvas(panes, bg=C_BG, highlightthickness=0, width=640)
+    canvas = tk.Canvas(panes, bg=C_BG, highlightthickness=0, width=px(560))
     panes.add(canvas, weight=3)
     canvas.bind("<Configure>", lambda e: draw_preview(canvas, info))
 
@@ -226,7 +264,7 @@ def preview_and_save(file_path, app):
     xscroll.pack(side="bottom", fill="x")
     text = tk.Text(text_frame, wrap="none", yscrollcommand=yscroll.set, xscrollcommand=xscroll.set,
                    bg=C_PANEL, fg=C_TEXT, insertbackground=C_TEXT, relief="flat", borderwidth=0,
-                   padx=10, pady=8, width=40, font=mono_font())
+                   padx=px(10), pady=px(8), width=40, font=mono_font())
     text.pack(expand=True, fill="both")
     yscroll.config(command=text.yview)
     xscroll.config(command=text.xview)
@@ -257,7 +295,7 @@ def preview_and_save(file_path, app):
         win.destroy()
 
     ttk.Button(buttons, text="Save G-code", style="Accent.TButton", command=save, width=16).pack(side="right")
-    ttk.Button(buttons, text="Cancel", command=win.destroy, width=12).pack(side="right", padx=(0, 8))
+    ttk.Button(buttons, text="Cancel", command=win.destroy, width=12).pack(side="right", padx=(0, px(8)))
 
     win.transient(app.root)
     win.lift()
@@ -275,15 +313,15 @@ class App:
         root.resizable(False, False)
         set_icon(root)
 
-        frame = ttk.Frame(root, padding=24)
+        frame = ttk.Frame(root, padding=px(24))
         frame.pack(expand=True, fill="both")
 
         # Header
         head = ttk.Frame(frame)
-        head.pack(fill="x", pady=(0, 20))
+        head.pack(fill="x", pady=(0, px(20)))
         try:
-            self.logo = tk.PhotoImage(file=resource_path("logo.png")).subsample(10, 10)
-            ttk.Label(head, image=self.logo).pack(side="left", padx=(0, 14))
+            self.logo = tk.PhotoImage(file=resource_path("logo.png")).subsample(max(1, round(10 / SCALE)))
+            ttk.Label(head, image=self.logo).pack(side="left", padx=(0, px(14)))
         except tk.TclError:
             pass
         titles = ttk.Frame(head)
@@ -292,7 +330,7 @@ class App:
         ttk.Label(titles, text="Plasma dry run for Centroid Acorn", foreground=C_MUTED).pack(anchor="w")
 
         # Settings card
-        card = ttk.Frame(frame, style="Card.TFrame", padding=18)
+        card = ttk.Frame(frame, style="Card.TFrame", padding=px(18))
         card.pack(fill="x")
         card.columnconfigure(0, weight=1)
 
@@ -300,25 +338,25 @@ class App:
         vcmd = root.register(validate_input)
         self.feed_var = tk.StringVar(value=self.options.get("last_feed") or "150")
         ttk.Entry(card, textvariable=self.feed_var, validate="key", validatecommand=(vcmd, "%P"),
-                  width=12).grid(row=1, column=0, sticky="ew", pady=(6, 14))
+                  width=12).grid(row=1, column=0, sticky="ew", pady=(px(6), px(14)))
         self.unit_var = tk.StringVar(value=self.options["feed_rate"])
         unit = ttk.Combobox(card, textvariable=self.unit_var, values=FEED_UNITS, state="readonly", width=10)
-        unit.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 14))
+        unit.grid(row=1, column=1, sticky="ew", padx=(px(8), 0), pady=(px(6), px(14)))
         unit.bind("<<ComboboxSelected>>", lambda e: self._save_settings())
 
         ttk.Label(card, text="G-code units (if the file has no G20 / G21)").grid(row=2, column=0, columnspan=2, sticky="w")
         label_for = {v: k for k, v in UNIT_CHOICES.items()}
         self.file_units_var = tk.StringVar(value=label_for[self.options["file_units"]])
         fu = ttk.Combobox(card, textvariable=self.file_units_var, values=list(UNIT_CHOICES), state="readonly")
-        fu.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        fu.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(px(6), 0))
         fu.bind("<<ComboboxSelected>>", lambda e: self._save_settings())
 
         # Main action
         ttk.Button(frame, text="Open G-code file...", style="Accent.TButton",
-                   command=self.select_file).pack(fill="x", pady=(20, 10), ipady=6)
+                   command=self.select_file).pack(fill="x", pady=(px(20), px(10)), ipady=px(6))
 
         self.status_var = tk.StringVar(value="Select a SheetCam G-code file to add the perimeter dry run.")
-        ttk.Label(frame, textvariable=self.status_var, foreground=C_MUTED, wraplength=360,
+        ttk.Label(frame, textvariable=self.status_var, foreground=C_MUTED, wraplength=px(320),
                   justify="center", anchor="center").pack(fill="x")
 
         root.bind("<Return>", lambda e: self.select_file())
@@ -358,6 +396,7 @@ def main():
     root = tk.Tk()
     if sv_ttk:
         sv_ttk.set_theme("dark")
+    apply_scaling(root)
     App(root)
     root.mainloop()
 
