@@ -1,0 +1,35 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+      - name: Build exe
+        run: |
+          python -m pip install pyinstaller
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name g-code_perimeter_generator --icon iconn.ico --add-data "iconn.ico;." --add-data "logo.png;." g-code_perimeter_generator.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-code_perimeter_generator
+          path: dist/g-code_perimeter_generator.exe
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/g-code_perimeter_generator.exe

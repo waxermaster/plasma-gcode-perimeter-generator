@@ -1,14 +1,23 @@
 # plasma-G-code-perimeter-generator
 CNC plasma G-code perimeter generator
-Hi ,
-this little software will take a g-code.TXT file find the furthest X and Y, generate a g-code to dry run only to does x and y, come back to 0,0 and then pause till cycle start or cancel.
-you are also able to choose your favorite feed for that dry run.
-it's currently only supporting Post processor: Centroid Acorn Plasma THC.scpost and you can find it in sheetcam if needed.
 
-if for any reason you want to change the feed once the code have been generated and saved you can modify the feed reload the files and it will over write the previous feed only for that "macro". 
+This little tool opens a plasma G-code file, finds the real extents of the cut (arcs included) and inserts a dry run at the start of the program: it traces a rectangle around the part at the feed you choose, comes back to X0 Y0, then pauses until you press **Cycle Start** (or Cancel to adjust the starting point).
 
+Made for the SheetCam post processor **Centroid Acorn Plasma THC.scpost**. The block is inserted before the first `M65`. If there is no `M65`, it goes before the first `M3`, or else before the first cut move.
 
-if you have a cnc plasma with a different controler then acorn let me know which post processor that you use if it's in the sheetcam list or send it to me via email at waxer.master@gmail.com.
-also if you have idea or feature that would be nice to add let me know and i'll see what i can do. 
+## Usage
+1. Run `g-code_perimeter_generator.exe` (or `python g-code_perimeter_generator.py`).
+2. The first time, choose your feed rate unit in **Machine Option**. The tool converts it to the units of the file (G20 = inch, G21 = mm).
+3. Type the feed, click **Select File**, check the preview (the inserted block is highlighted) and click **Save**.
 
-on that, i Hope it will save you some time over conventional dry run.
+To change the feed later, open the saved file again with a new feed. The old perimeter block is replaced. The rest of the program is never changed.
+
+Settings are saved in `%APPDATA%\GcodePerimeterGenerator\machine_option.json`.
+
+## Download / build
+- Every push builds the exe with GitHub Actions (tab **Actions** > latest run > artifact). Pushing a tag such as `v2.0` attaches the exe to a GitHub release.
+- To build it yourself on Windows: install Python 3 from python.org, then double-click `build.bat`. The exe goes into `dist\`.
+- Tests: `python -m unittest discover -s tests`
+- Sample files for trying the app (not for real cutting): `examples/`
+
+If your plasma uses another controller, tell me which SheetCam post processor you use (waxer.master@gmail.com).

@@ -1,290 +1,303 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox
-from tkinter import ttk
-import os
 import json
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
-# Find X and Y furthest position and lowest position
+from perimeter_core import FEED_UNITS, GcodeError, perimeter_path, process
+
+BG = "#444444"
+APP_NAME = "GcodePerimeterGenerator"
+
+
+# Paths
 #-----------------------------------------------------------------------
-def parse_gcode(file_path):
-    
-    highest_x = float('-inf')
-    highest_y = float('-inf')
-    lowest_x = float('inf')
-    lowest_y = float('inf')
+def resource_path(name):
+    """Works from source and from a PyInstaller exe (files unpacked to sys._MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
-    with open(file_path, 'r') as f:
-        for line in f:
-            if line.startswith('G0') or line.startswith('G1') or line.startswith('G2') or line.startswith('G3'):
-                parts = line.split()
-                for part in parts:
-                    if part.startswith('X'):
-                        x = float(part[1:])
-                        if x > highest_x:
-                            highest_x = x
-                        if x < lowest_x:
-                            lowest_x = x
-                    elif part.startswith('Y'):
-                        y = float(part[1:])
-                        if y > highest_y:
-                            highest_y = y
-                        if y < lowest_y:
-                            lowest_y = y
-    
-    return highest_x, highest_y, lowest_x, lowest_y
-#preview the G-code 
-#---------------------------------------------------------------------
-def preview_and_save(file_path, feed_rate_entry, root):
-    hX, hY, lX, lY = parse_gcode(file_path)
 
-    feed_rate = feed_rate_entry.get()
+def config_path():
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    folder = os.path.join(base, APP_NAME)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "machine_option.json")
+
+
+def set_icon(window):
     try:
-        F_value = int(feed_rate)
+        window.iconbitmap(resource_path("iconn.ico"))
+    except tk.TclError:
+        pass  # .ico is Windows-only; never crash over an icon
+
+
+# Options
+#-----------------------------------------------------------------------
+DEFAULT_OPTIONS = {"feed_rate": "inch/min", "file_units": "auto", "last_feed": "150", "last_dir": ""}
+
+
+def load_machine_options():
+    options = dict(DEFAULT_OPTIONS)
+    for path in (config_path(), "machine_option.json"):  # 2nd = file left by the old version
+        try:
+            with open(path, "r") as f:
+                options.update(json.load(f))
+            break
+        except (OSError, ValueError):
+            continue
+    if options.get("feed_rate") not in FEED_UNITS:
+        options["feed_rate"] = DEFAULT_OPTIONS["feed_rate"]
+    return options
+
+
+def save_machine_options(options):
+    try:
+        with open(config_path(), "w") as f:
+            json.dump(options, f, indent=2)
+    except OSError as e:
+        messagebox.showerror("Error", f"Could not save options:\n{e}")
+
+
+# Preview and save
+#-----------------------------------------------------------------------
+def draw_preview(canvas, info):
+    """Cut paths in grey/blue, perimeter dry run in orange, 0,0 as a red cross."""
+    canvas.delete("all")
+    w, h = canvas.winfo_width(), canvas.winfo_height()
+    if w < 20 or h < 20:
+        return
+    path = perimeter_path(info)
+    xs = [p[0] for p in path] + [0.0]
+    ys = [p[1] for p in path] + [0.0]
+    min_x, max_x, min_y, max_y = min(xs), max(xs), min(ys), max(ys)
+    margin = 30
+    scale = min((w - 2 * margin) / ((max_x - min_x) or 1), (h - 2 * margin) / ((max_y - min_y) or 1))
+    ox = (w - (max_x - min_x) * scale) / 2
+    oy = (h - (max_y - min_y) * scale) / 2
+
+    def pt(x, y):
+        return ox + (x - min_x) * scale, h - (oy + (y - min_y) * scale)
+
+    def flat(points):
+        return [c for p in points for c in pt(*p)]
+
+    for seg in info["rapids"]:
+        canvas.create_line(*flat(seg), fill="#555555", dash=(2, 4))
+    for seg in info["cuts"]:
+        canvas.create_line(*flat(seg), fill="#4fc3f7", width=2)
+    canvas.create_line(*flat(path), fill="#ff9800", width=2, dash=(8, 4), arrow="last", arrowshape=(12, 14, 5))
+    sx, sy = pt(*path[0])
+    canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5, outline="#ff9800", width=2)
+    zx, zy = pt(0, 0)
+    canvas.create_line(zx - 8, zy, zx + 8, zy, fill="#ef5350", width=2)
+    canvas.create_line(zx, zy - 8, zx, zy + 8, fill="#ef5350", width=2)
+    canvas.create_text(zx + 6, zy + 4, text="X0 Y0", fill="#ef5350", anchor="nw")
+    canvas.create_text(10, 10, anchor="nw", fill="white", justify="left",
+                       text="Blue: cut\nOrange: perimeter dry run\nRed: X0 Y0")
+
+
+def preview_and_save(file_path, feed_rate_entry, root, options):
+    try:
+        feed = float(feed_rate_entry.get())
+        if feed <= 0:
+            raise ValueError
     except ValueError:
-        messagebox.showerror("Error", "Invalid feed rate value. Please enter a valid integer.")
+        messagebox.showerror("Error", "Invalid feed rate value. Please enter a number greater than 0.")
         return
 
-    # Load machine options from JSON file
-    machine_options = load_machine_options()
-
-    if machine_options and "machine_orientation" in machine_options:
-        machine_orientation = machine_options["machine_orientation"]
-    else:
-        messagebox.showerror("Error", "Machine orientation not found in the machine options.")
+    try:
+        with open(file_path, "r", encoding="latin-1", newline="") as f:
+            lines = f.readlines()
+        default_units = None if options["file_units"] == "auto" else options["file_units"]
+        new_lines, info, notes = process(lines, feed, options["feed_rate"], default_units)
+    except (OSError, GcodeError) as e:
+        messagebox.showerror("Error", str(e))
         return
 
-    if machine_orientation == "X+/Y+":
-        metadata_text = (
-            f'G1 X{hX} F{F_value}\n'
-            f'G1 Y{hY} F{F_value}\n'
-            f'G1 X{lX} F{F_value}\n'
-            f'G1 Y{lY} F{F_value}\n'
-            f'M225 #100 "Cycle Start to continue, or Cancel to adjust the starting point."\n'
-        )
-    elif machine_orientation == "X+/Y-":
-        metadata_text = (
-            f'G1 X{hX} F{F_value}\n'
-            f'G1 Y{lY} F{F_value}\n'
-            f'G1 X{lX} F{F_value}\n'
-            f'G1 Y{hY} F{F_value}\n'
-            f'M225 #100 "Cycle Start to continue, or Cancel to adjust the starting point."\n'
-        )
-    elif machine_orientation == "X-/Y-":
-        metadata_text = (
-            f'G1 X{lX} F{F_value}\n'
-            f'G1 Y{lY} F{F_value}\n'
-            f'G1 X{hX} F{F_value}\n'
-            f'G1 Y{hY} F{F_value}\n'
-            f'M225 #100 "Cycle Start to continue, or Cancel to adjust the starting point."\n'
-        )
-    elif machine_orientation == "X-/Y+":
-        metadata_text = (
-            f'G1 X{lX} F{F_value}\n'
-            f'G1 Y{hY} F{F_value}\n'
-            f'G1 X{hX} F{F_value}\n'
-            f'G1 Y{lY} F{F_value}\n'
-            f'M225 #100 "Cycle Start to continue, or Cancel to adjust the starting point."\n'
-        )
-    else:
-        messagebox.showerror("Error", "Invalid machine orientation.")
-        return
+    options["last_feed"] = feed_rate_entry.get()
+    options["last_dir"] = os.path.dirname(file_path)
+    save_machine_options(options)
 
-    with open(file_path, 'r') as f:
-        lines = f.readlines()
-        m225_found = False
-        for i, line in enumerate(lines):
-            if line.strip().startswith('M225'):
-                m225_found = True
-            if line.strip().startswith('M65'):
-                if m225_found:
-                    # Modify previous G1 lines with new feed rate value
-                    for j in range(i - 1, -1, -1):
-                        if lines[j].strip().startswith('G1'):
-                            lines[j] = lines[j].split('F')[0] + f'F{F_value}\n'
-                else:
-                    # Insert metadata text if M225 not found before M65
-                    lines.insert(i, metadata_text)
-                break
+    u = info["file_units"]
+    summary = (
+        f"X: {info['min_x']:.4f} to {info['max_x']:.4f}    "
+        f"Y: {info['min_y']:.4f} to {info['max_y']:.4f}    ({u})\n"
+        f"Size: {info['max_x'] - info['min_x']:.4f} x {info['max_y'] - info['min_y']:.4f} {u}    "
+        f"Feed: {info['feed_out']:.2f} {u}/min\n" + "\n".join(notes)
+    )
 
     preview_window = tk.Toplevel(root)
-    preview_window.title("Preview")
-    preview_window.iconbitmap("iconn.ico")
-    preview_window.configure(bg="#444444")
+    preview_window.title(f"Preview - {os.path.basename(file_path)}")
+    preview_window.geometry("1100x700")
+    preview_window.minsize(700, 450)
+    set_icon(preview_window)
+    preview_window.configure(bg=BG)
 
-    preview_text_widget = tk.Text(preview_window, wrap="word")
-    preview_text_widget.insert("1.0", ''.join(lines))  # Display entire G-code with added metadata
+    tk.Label(preview_window, text=summary, justify="left", anchor="w",
+             bg=BG, fg="white", font=("Consolas", 10)).pack(fill="x", padx=5, pady=5)
+
+    buttons = tk.Frame(preview_window, bg=BG)
+    buttons.pack(side="bottom", fill="x")
+
+    panes = tk.PanedWindow(preview_window, orient="horizontal", bg=BG, sashwidth=6)
+    panes.pack(expand=True, fill="both", padx=5)
+
+    canvas = tk.Canvas(panes, bg="#1e1e1e", highlightthickness=0)
+    panes.add(canvas, minsize=300, width=600)
+    canvas.bind("<Configure>", lambda e: draw_preview(canvas, info))
+
+    text_frame = tk.Frame(panes)
+    panes.add(text_frame, minsize=250)
+    yscroll = tk.Scrollbar(text_frame)
+    yscroll.pack(side="right", fill="y")
+    xscroll = tk.Scrollbar(text_frame, orient="horizontal")
+    xscroll.pack(side="bottom", fill="x")
+    preview_text_widget = tk.Text(text_frame, wrap="none", yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
     preview_text_widget.pack(expand=True, fill="both")
+    yscroll.config(command=preview_text_widget.yview)
+    xscroll.config(command=preview_text_widget.xview)
+    preview_text_widget.insert("1.0", "".join(new_lines).replace("\r\n", "\n"))
+    preview_text_widget.tag_configure("block", background="#ffe9a8")
+    start = preview_text_widget.search("PERIMETER DRY RUN START", "1.0")
+    end = preview_text_widget.search("PERIMETER DRY RUN END", "1.0")
+    if start and end:
+        preview_text_widget.tag_add("block", f"{start} linestart", f"{end} lineend")
+        preview_text_widget.see(f"{start} linestart")
+    preview_text_widget.xview_moveto(0)
+    preview_text_widget.config(state="disabled")
+
+    # Bring the preview in front of the main window
+    preview_window.transient(root)
+    preview_window.lift()
+    preview_window.focus_force()
 
     def save():
-        new_file_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
-        if new_file_path:
-            with open(new_file_path, 'w') as new_file:
-                new_file.writelines(lines)
-            messagebox.showinfo("Success", "Metadata added and file saved successfully.")
-            preview_window.destroy()
+        name, ext = os.path.splitext(os.path.basename(file_path))
+        new_file_path = filedialog.asksaveasfilename(
+            parent=preview_window,
+            initialdir=os.path.dirname(file_path),
+            initialfile=f"{name}{ext or '.txt'}",
+            defaultextension=ext or ".txt",
+            filetypes=[("G-code files", "*.txt *.nc *.tap *.ngc *.cnc"), ("All files", "*.*")],
+        )
+        if not new_file_path:
+            return
+        try:
+            with open(new_file_path, "w", encoding="latin-1", newline="") as new_file:
+                new_file.writelines(new_lines)
+        except OSError as e:
+            messagebox.showerror("Error", f"Could not save file:\n{e}", parent=preview_window)
+            return
+        messagebox.showinfo("Success", "Perimeter added and file saved successfully.", parent=preview_window)
+        preview_window.destroy()
 
-    save_button = tk.Button(preview_window, text="Save", command=save)
-    save_button.pack(side="left", padx=5, pady=5)
+    tk.Button(buttons, text="Save", width=10, command=save).pack(side="left", padx=5, pady=5)
+    tk.Button(buttons, text="Cancel", width=10, command=preview_window.destroy).pack(side="right", padx=5, pady=5)
 
-    cancel_button = tk.Button(preview_window, text="Cancel", command=preview_window.destroy)
-    cancel_button.pack(side="right", padx=5, pady=5)
 
-#Select a .txt files
-#---------------------------------------------        
-def select_file(feed_rate_entry, root):
-    file_path = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+def select_file(feed_rate_entry, root, options):
+    file_path = filedialog.askopenfilename(
+        initialdir=options.get("last_dir") or None,
+        filetypes=[("G-code files", "*.txt *.nc *.tap *.ngc *.cnc"), ("All files", "*.*")],
+    )
     if file_path:
-        preview_and_save(file_path, feed_rate_entry, root)  # Pass 'root' as an additional argument
+        preview_and_save(file_path, feed_rate_entry, root, options)
 
-#------------------------------------------------------
+
 def validate_input(new_value):
-    if new_value.isdigit() or new_value == "":
+    if new_value == "":
         return True
-    else:
-        return False
-
-# Example function to refresh the main page
-#----------------------------------------------------
-def refresh_main_page():
-    # Write your code to refresh the main page here
-    pass
-
-#------------------------------------------------------
-def open_machine_option_setting(root, feed_rate_label):
-    machine_option_window = tk.Toplevel(root)
-    machine_option_window.title("Machine Option Setting")
-    
-    # Set the machine option window properties to match the main window
-    machine_option_window.geometry("400x300")
-    machine_option_window.configure(bg=root.cget('bg'))
-    machine_option_window.iconbitmap(root.iconbitmap())
-
-    def handle_radiobutton_selection(option, group):
-        print(f"Selected {option} for {group}")
-
-    # Load saved options
-    saved_options = load_machine_options()
-
-    # Feed rate options
-    feed_rate_frame = ttk.LabelFrame(machine_option_window, text="Feed Rate")
-    feed_rate_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-    feed_rate_var = tk.StringVar(value="inch/min")  # Default value
-    feed_rate_options = ["inch/min", "ft/min", "mm/sec", "mm/min", "m/min", "m/sec"]
-    for i, option in enumerate(feed_rate_options):
-        radiobutton = ttk.Radiobutton(feed_rate_frame, text=option, variable=feed_rate_var, value=option, command=lambda option=option: handle_radiobutton_selection(option, "Feed Rate"))
-        radiobutton.grid(row=i, column=0, padx=5, pady=2, sticky="w")
-
-    # Set the radio button to the value saved in the JSON file, if available
-    if saved_options and "feed_rate" in saved_options:
-        feed_rate_var.set(saved_options["feed_rate"])
-
-    # Machine orientation options
-    machine_orientation_frame = ttk.LabelFrame(machine_option_window, text="Machine Orientation")
-    machine_orientation_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
-    machine_orientation_options = ["X+/Y+", "X-/Y+", "X-/Y-", "X+/Y-"]
-    machine_orientation_var = tk.StringVar(value="X+/Y+")  # Default value
-    for i, option in enumerate(machine_orientation_options):
-        radiobutton = ttk.Radiobutton(machine_orientation_frame, text=option, variable=machine_orientation_var, value=option, command=lambda option=option: handle_radiobutton_selection(option, "Machine Orientation"))
-        radiobutton.grid(row=i, column=0, padx=5, pady=2, sticky="w")
-
-    # Set the radio button to the value saved in the JSON file, if available
-    if saved_options and "machine_orientation" in saved_options:
-        machine_orientation_var.set(saved_options["machine_orientation"])
-
-    # Configure column weights for equal spacing
-    machine_option_window.columnconfigure(0, weight=1)
-    machine_option_window.columnconfigure(1, weight=1)
-
-    # Save button
-    save_button = tk.Button(machine_option_window, text="Save", command=lambda: save_machine_options(root, machine_option_window, feed_rate_var, machine_orientation_var, feed_rate_label))
-    save_button.grid(row=1, column=0, columnspan=2, pady=(50, 0), padx=150, sticky="ew")
-
-#------------------------------------------------------------------
-def save_machine_options(root, machine_option_window, feed_rate_var, machine_orientation_var, feed_rate_label):
-    # Get the selected options
-    selected_options = {
-        "feed_rate": feed_rate_var.get(),
-        "machine_orientation": machine_orientation_var.get()
-    }
-    
-    # Save the options to a JSON file
-    with open("machine_option.json", "w") as json_file:
-        json.dump(selected_options, json_file)
-    
-    # Update the feed rate label text in the main window
-    if feed_rate_label is not None:
-        if selected_options and "feed_rate" in selected_options:
-            feed_rate_label_text = f"Enter feed rate in {selected_options['feed_rate']}:"
-        else:
-            feed_rate_label_text = "configure machine option"
-        feed_rate_label.config(text=feed_rate_label_text)
-
-    # Close the machine option window
-    machine_option_window.destroy()
-
-    # Refresh the main page (assuming you have a function to refresh the main page)
-    refresh_main_page()
-
-    # Show a message indicating successful save
-    messagebox.showinfo("Success", "Options saved")
-
-# Load saved options from JSON file
-#------------------------------------------------------------------
-def load_machine_options():
     try:
-        with open("machine_option.json", "r") as json_file:
-            options = json.load(json_file)
-            return options
-    except FileNotFoundError:
-        return None
+        float(new_value)
+        return True
+    except ValueError:
+        return new_value == "."
+
+
+# Machine options window
+#-----------------------------------------------------------------------
+def open_machine_option_setting(root, feed_rate_label, options):
+    win = tk.Toplevel(root)
+    win.title("Machine Option Setting")
+    win.configure(bg=root.cget("bg"))
+    win.resizable(False, False)
+    set_icon(win)
+    win.transient(root)
+    win.grab_set()
+
+    feed_rate_var = tk.StringVar(value=options["feed_rate"])
+    frame = ttk.LabelFrame(win, text="Feed Rate Unit")
+    frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+    for i, option in enumerate(FEED_UNITS):
+        ttk.Radiobutton(frame, text=option, variable=feed_rate_var, value=option).grid(
+            row=i, column=0, padx=5, pady=2, sticky="w")
+
+    units_var = tk.StringVar(value=options["file_units"])
+    frame2 = ttk.LabelFrame(win, text="G-code Units")
+    frame2.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+    for i, (value, text) in enumerate([("auto", "Auto (G20/G21)"), ("inch", "Inch"), ("mm", "mm")]):
+        ttk.Radiobutton(frame2, text=text, variable=units_var, value=value).grid(
+            row=i, column=0, padx=5, pady=2, sticky="w")
+    ttk.Label(frame2, text="Used only if the file\nhas no G20 / G21.", justify="left").grid(
+        row=3, column=0, padx=5, pady=(8, 2), sticky="w")
+
+    win.columnconfigure(0, weight=1)
+    win.columnconfigure(1, weight=1)
+
+    def save():
+        options["feed_rate"] = feed_rate_var.get()
+        options["file_units"] = units_var.get()
+        save_machine_options(options)
+        feed_rate_label.config(text=f"Enter feed rate in {options['feed_rate']}:")
+        win.destroy()
+
+    tk.Button(win, text="Save", command=save).grid(row=1, column=0, columnspan=2, pady=10, padx=100, sticky="ew")
+
 
 #------------------------------------------------------------------
 def main():
+    if sys.platform == "win32":
+        try:  # sharp text on high-DPI screens
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+
     root = tk.Tk()
     root.title("G-code Perimeter Generator")
-    root.geometry("400x400")
-    root.iconbitmap("iconn.ico")
-    root.configure(bg="#444444")
+    root.geometry("400x430")
+    set_icon(root)
+    root.configure(bg=BG)
 
-    # Load saved options
-    saved_options = load_machine_options()
+    options = load_machine_options()
+    first_run = not os.path.exists(config_path())
 
-    # Load the logo image
-    logo_image = tk.PhotoImage(file="logo.png")  # Replace "logo.png" with the path to your logo image
-    logo_image_resized = logo_image.subsample(7, 7)
+    try:
+        logo_image = tk.PhotoImage(file=resource_path("logo.png")).subsample(7, 7)
+        logo_label = tk.Label(root, image=logo_image, bg=BG)
+        logo_label.image = logo_image
+        logo_label.pack(pady=10)
+    except tk.TclError:
+        pass
 
-    # Create a label to display the logo
-    logo_label = tk.Label(root, image=logo_image_resized, bg="#444444")
-    logo_label.pack(pady=10)  # Adjust the padding as needed
+    tk.Label(root, text="G-code Perimeter Generator", font=("Helvetica", 16), bg=BG, fg="white").pack(padx=20, pady=20)
 
-    title_label = tk.Label(root, text="G-code Perimeter Generator", font=("Helvetica", 16), bg="#444444", fg="white")
-    title_label.pack(padx=20, pady=20)
-
-    validate_cmd = root.register(validate_input)
-
-    # Configure and display feed rate label
-    feed_rate_label = tk.Label(root, text="Enter feed rate in inch/min:", font=("Helvetica", 11), bg="#444444", fg="white")
+    feed_rate_label = tk.Label(root, text=f"Enter feed rate in {options['feed_rate']}:",
+                               font=("Helvetica", 11), bg=BG, fg="white")
     feed_rate_label.pack(padx=20, pady=(20, 5))
 
+    validate_cmd = root.register(validate_input)
     feed_rate_entry = tk.Entry(root, validate="key", validatecommand=(validate_cmd, "%P"))
-    feed_rate_entry.insert(0, "150")  # Set default value to 150
+    feed_rate_entry.insert(0, options.get("last_feed") or "150")
     feed_rate_entry.pack(padx=20, pady=(0, 20))
 
-    select_button = tk.Button(root, text="Select File", command=lambda: select_file(feed_rate_entry, root))
-    select_button.pack(padx=20, pady=(0, 20))
+    tk.Button(root, text="Select File", command=lambda: select_file(feed_rate_entry, root, options)).pack(padx=20, pady=(0, 20))
+    tk.Button(root, text="Machine Option",
+              command=lambda: open_machine_option_setting(root, feed_rate_label, options)).pack(padx=20, pady=(0, 20))
 
-    machine_option_button = tk.Button(root, text="Machine Option", command=lambda: open_machine_option_setting(root, feed_rate_label))
-
-    #machine_option_button = tk.Button(root, text="Machine Option", command=lambda: open_machine_option_setting(feed_rate_entry, root))
-    machine_option_button.pack(padx=20, pady=(0, 20))
-
-    # If saved_options exist, update the feed rate label text
-    if saved_options and "feed_rate" in saved_options:
-        feed_rate_label_text = f"Enter feed rate in {saved_options['feed_rate']}:"
-        feed_rate_label.config(text=feed_rate_label_text)
-    else:
-        # If no saved options, open machine option window
-        open_machine_option_setting(root, feed_rate_label)
+    if first_run:
+        root.after(100, lambda: open_machine_option_setting(root, feed_rate_label, options))
 
     root.mainloop()
 

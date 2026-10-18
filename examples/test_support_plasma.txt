@@ -1,0 +1,47 @@
+(Filename: test_support_plasma.txt)
+(Post processor: Centroid Acorn Plasma THC - fichier de TEST fait a la main)
+(Piece: support 8 x 5 po, coins arrondis, 2 trous, oreille ronde en haut)
+G20 (Units: Inches)
+G40 G90
+G17
+M65
+(Trou gauche, diametre 1.5)
+G0 X3.75 Y3.5
+G0 Z0.15
+M3
+G4 P0.5
+G1 Z0.06 F50
+G3 X3.75 Y3.5 I-0.75 J0 F90
+M5
+G0 Z1
+(Trou droit, diametre 1.5)
+G0 X7.75 Y3.5
+G0 Z0.15
+M3
+G4 P0.5
+G1 Z0.06 F50
+G3 X7.75 Y3.5 I-0.75 J0 F90
+M5
+G0 Z1
+(Contour exterieur avec lead-in)
+G0 X1.5 Y0.7
+G0 Z0.15
+M3
+G4 P0.5
+G1 Z0.06 F50
+G1 X1.5 Y1 F120
+G1 X8.5 Y1
+G3 X9 Y1.5 I0 J0.5
+G1 X9 Y5.5
+G3 X8.5 Y6 I-0.5 J0
+G1 X6 Y6
+G3 X4 Y6 I-1 J0
+G1 X1.5 Y6
+G3 X1 Y5.5 I0 J-0.5
+G1 X1 Y1.5
+G3 X1.5 Y1 I0.5 J0
+M5
+G0 Z1
+G0 X0 Y0
+G28 X0 Y0
+M30

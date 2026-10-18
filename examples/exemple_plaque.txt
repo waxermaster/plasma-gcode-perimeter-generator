@@ -1,0 +1,18 @@
+(Exemple: plaque 10 x 6 pouces avec un trou de 2 po)
+G20 G90 G40
+M65
+(Trou rond, centre X5 Y3)
+G0 X6 Y3
+M3
+G3 X6 Y3 I-1 J0 F120
+M5
+(Contour exterieur)
+G0 X0.5 Y0.5
+M3
+G1 X10.5 Y0.5 F120
+G1 X10.5 Y6.5
+G1 X0.5 Y6.5
+G1 X0.5 Y0.5
+M5
+G0 X0 Y0
+M30
